@@ -70,6 +70,7 @@ const (
 	excludedServerStates = ""
 	showStatCmd          = "show stat\n"
 	showInfoCmd          = "show info\n"
+	targetReqEnv         = "EXPORTER_CUSTOM_TARGET_REQUESTS"
 )
 
 var (
@@ -235,6 +236,10 @@ var (
 	haproxyInfo    = prometheus.NewDesc(prometheus.BuildFQName(namespace, "version", "info"), "HAProxy version info.", []string{"release_date", "version"}, nil)
 	haproxyUp      = prometheus.NewDesc(prometheus.BuildFQName(namespace, "", "up"), "Was the last scrape of HAProxy successful.", nil, nil)
 	haproxyIdlePct = prometheus.NewDesc(prometheus.BuildFQName(namespace, "process_idle_time", "percent"), "Time spent waiting for events instead of processing them.", nil, nil)
+
+	rpsPerServer = newBackendMetric("server_rate", "Current number rps for one server.", prometheus.GaugeValue, nil)
+
+	targetRequests = 0
 )
 
 // Exporter collects HAProxy stats from the given URI and exports them using
@@ -316,6 +321,7 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 	for _, m := range e.serverMetrics {
 		ch <- m.Desc
 	}
+	ch <- rpsPerServer.Desc
 	ch <- haproxyInfo
 	ch <- haproxyUp
 	ch <- haproxyIdlePct
@@ -540,6 +546,9 @@ func (e *Exporter) exportCsvFields(metrics map[int]metricInfo, csvRow []string, 
 			continue
 		}
 		ch <- prometheus.MustNewConstMetric(metric.Desc, metric.Type, value, labels...)
+		if fieldIdx == 19 {
+			ch <- prometheus.MustNewConstMetric(rpsPerServer.Desc, rpsPerServer.Type, float64(targetRequests)/value, labels...)
+		}
 	}
 }
 
@@ -584,6 +593,7 @@ func main() {
 		haProxyTimeout             = kingpin.Flag("haproxy.timeout", "Timeout for trying to get stats from HAProxy.").Default("5s").Duration()
 		haProxyPidFile             = kingpin.Flag("haproxy.pid-file", pidFileHelpText).Default("").String()
 		httpProxyFromEnv           = kingpin.Flag("http.proxy-from-env", "Flag that enables using HTTP proxy settings from environment variables ($http_proxy, $https_proxy, $no_proxy)").Default("false").Bool()
+		err                        error
 	)
 
 	promlogConfig := &promlog.Config{}
@@ -592,6 +602,17 @@ func main() {
 	kingpin.HelpFlag.Short('h')
 	kingpin.Parse()
 	logger := promlog.New(promlogConfig)
+
+	targetRequestsStr, exists := os.LookupEnv(targetReqEnv)
+	if exists {
+		targetRequests, err = strconv.Atoi(targetRequestsStr)
+		if err != nil {
+			level.Error(logger).Log("msg", "Failed to parse required env", "env", targetReqEnv)
+		}
+	} else {
+		level.Warn(logger).Log("msg", "Required env variable is not set", "env", targetReqEnv)
+		targetRequests = 15
+	}
 
 	selectedServerMetrics, err := filterServerMetrics(*haProxyServerMetricFields)
 	if err != nil {
